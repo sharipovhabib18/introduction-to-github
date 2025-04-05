@@ -1,0 +1,180 @@
+import logging
+import sqlite3
+import asyncio
+from aiogram import Bot, Dispatcher, types, F
+from aiogram.filters import Command
+from aiogram.fsm.state import State, StatesGroup
+from aiogram.fsm.context import FSMContext
+from aiogram.types import ReplyKeyboardRemove
+from datetime import datetime
+
+# Настройка логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
+
+# Токен бота (замените на свой, полученный от @BotFather)
+BOT_TOKEN = "7680468925:AAEP0IUteFVbRUyrD-S_GWckdXvRp9E6e_g"
+
+# Инициализация бота и диспетчера
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
+
+# Инициализация базы данных
+def init_db():
+    with sqlite3.connect('goals.db') as conn:
+        conn.execute('''
+        CREATE TABLE IF NOT EXISTS goals (
+            user_id INTEGER PRIMARY KEY,
+            goal TEXT NOT NULL,
+            progress INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+        ''')
+        conn.commit()
+
+init_db()
+
+# Состояния FSM
+class GoalStates(StatesGroup):
+    setting_goal = State()
+
+# ========== ОБРАБОТЧИКИ КОМАНД ==========
+
+@dp.message(Command("start", "help"))
+async def cmd_start(message: types.Message):
+    """Обработчик команд /start и /help"""
+    await message.answer(
+        "🎯 Бот для отслеживания целей\n\n"
+        "Доступные команды:\n"
+        "/setgoal - установить новую цель\n"
+        "/mygoal - посмотреть текущую цель\n"
+        "/progress - увеличить прогресс\n"
+        "/delete - удалить цель\n"
+        "/help - показать это сообщение",
+        reply_markup=ReplyKeyboardRemove()
+    )
+
+@dp.message(Command("setgoal"))
+async def cmd_set_goal(message: types.Message, state: FSMContext):
+    """Обработчик команды /setgoal"""
+    await message.answer(
+        "📝 Введите свою цель:",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    await state.set_state(GoalStates.setting_goal)
+
+@dp.message(GoalStates.setting_goal)
+async def process_goal(message: types.Message, state: FSMContext):
+    """Обработчик ввода цели"""
+    user_id = message.from_user.id
+    goal_text = message.text.strip()
+    
+    if not goal_text:
+        await message.answer("Цель не может быть пустой!")
+        return
+    
+    try:
+        with sqlite3.connect('goals.db') as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO goals (user_id, goal) VALUES (?, ?)",
+                (user_id, goal_text)
+            )
+            conn.commit()
+        await message.answer(f"✅ Цель сохранена: {goal_text}")
+    except Exception as e:
+        logger.error(f"Ошибка сохранения цели: {e}")
+        await message.answer("❌ Не удалось сохранить цель")
+    finally:
+        await state.clear()
+
+@dp.message(Command("mygoal"))
+async def cmd_my_goal(message: types.Message):
+    """Обработчик команды /mygoal"""
+    user_id = message.from_user.id
+    
+    try:
+        with sqlite3.connect('goals.db') as conn:
+            cursor = conn.execute(
+                "SELECT goal, progress FROM goals WHERE user_id = ?",
+                (user_id,)
+            )
+            goal = cursor.fetchone()
+            
+            if goal:
+                progress_bar = "[" + "▓" * (goal[1] // 5) + "░" * (20 - goal[1] // 5) + "]"
+                await message.answer(
+                    f"📌 Ваша цель: {goal[0]}\n"
+                    f"📊 Прогресс: {progress_bar} {goal[1]}%"
+                )
+            else:
+                await message.answer("ℹ️ У вас нет установленной цели. Используйте /setgoal")
+    except Exception as e:
+        logger.error(f"Ошибка получения цели: {e}")
+        await message.answer("❌ Не удалось получить цель")
+
+@dp.message(Command("progress"))
+async def cmd_progress(message: types.Message):
+    """Обработчик команды /progress"""
+    user_id = message.from_user.id
+    
+    try:
+        with sqlite3.connect('goals.db') as conn:
+            # Увеличиваем прогресс на 5
+            conn.execute(
+                "UPDATE goals SET progress = progress + 5 WHERE user_id = ?",
+                (user_id,)
+            )
+            conn.commit()
+            
+            # Получаем обновленные данные
+            cursor = conn.execute(
+                "SELECT goal, progress FROM goals WHERE user_id = ?",
+                (user_id,)
+            )
+            goal = cursor.fetchone()
+            
+            if goal:
+                progress_bar = "[" + "▓" * (goal[1] // 5) + "░" * (20 - goal[1] // 5) + "]"
+                await message.answer(
+                    f"📈 Прогресс увеличен!\n"
+                    f"Цель: {goal[0]}\n"
+                    f"Прогресс: {progress_bar} {goal[1]}%"
+                )
+            else:
+                await message.answer("ℹ️ У вас нет цели. Используйте /setgoal")
+    except Exception as e:
+        logger.error(f"Ошибка обновления прогресса: {e}")
+        await message.answer("❌ Не удалось обновить прогресс")
+
+@dp.message(Command("delete"))
+async def cmd_delete(message: types.Message):
+    """Обработчик команды /delete"""
+    user_id = message.from_user.id
+    
+    try:
+        with sqlite3.connect('goals.db') as conn:
+            cursor = conn.execute(
+                "DELETE FROM goals WHERE user_id = ?",
+                (user_id,)
+            )
+            conn.commit()
+            
+            if cursor.rowcount > 0:
+                await message.answer("🗑️ Цель успешно удалена!")
+            else:
+                await message.answer("ℹ️ У вас нет цели для удаления")
+    except Exception as e:
+        logger.error(f"Ошибка удаления цели: {e}")
+        await message.answer("❌ Не удалось удалить цель")
+
+# ========== ЗАПУСК БОТА ==========
+async def main():
+    """Основная функция запуска бота"""
+    logger.info("Запуск бота...")
+    await dp.start_polling(bot)
+
+if __name__ == "__main__":
+    asyncio.run(main())
